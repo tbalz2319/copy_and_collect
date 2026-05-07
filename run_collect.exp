@@ -1,0 +1,126 @@
+#!/usr/bin/expect -f
+# ============================================================
+# run_collect.exp
+# 1. SCPs collect.sh to the remote server /tmp/
+# 2. SSHs in and runs it as sudo
+# 3. Cats the resulting CSV back to a local file
+#
+# Called automatically by master_collect.sh — do not run directly
+# ============================================================
+
+set host        [lindex $argv 0]
+set username    [lindex $argv 1]
+set password    [lindex $argv 2]
+set local_script [lindex $argv 3]   ;# path to collect.sh on jump server
+set output_file [lindex $argv 4]    ;# where to save the CSV locally
+
+set timeout 120
+log_user 0
+
+# -----------------------------------------------
+# STEP 1 — SCP collect.sh to the remote server
+# -----------------------------------------------
+spawn scp \
+    -o StrictHostKeyChecking=no \
+    -o ConnectTimeout=20 \
+    -o KexAlgorithms=+diffie-hellman-group1-sha1 \
+    -o HostKeyAlgorithms=+ssh-rsa \
+    -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+    ${local_script} \
+    ${username}@${host}:/tmp/collect.sh
+
+expect {
+    timeout                                 { puts stderr "TIMEOUT_SCP: $host";    exit 1 }
+    "Connection refused"                    { puts stderr "REFUSED: $host";        exit 1 }
+    "No route to host"                      { puts stderr "UNREACHABLE: $host";    exit 1 }
+    "Are you sure you want to continue"     { send "yes\r"; exp_continue }
+    -nocase "password:"                     { send "${password}\r" }
+}
+
+expect {
+    timeout                                 { puts stderr "TIMEOUT_SCP_DONE: $host"; exit 1 }
+    "Permission denied"                     { puts stderr "AUTHFAIL_SCP: $host";     exit 1 }
+    eof                                     { }
+}
+
+# -----------------------------------------------
+# STEP 2 — SSH in and run collect.sh as sudo
+# -----------------------------------------------
+spawn ssh \
+    -o StrictHostKeyChecking=no \
+    -o ConnectTimeout=20 \
+    -o ServerAliveInterval=15 \
+    -o KexAlgorithms=+diffie-hellman-group1-sha1 \
+    -o HostKeyAlgorithms=+ssh-rsa \
+    -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+    ${username}@${host}
+
+expect {
+    timeout                                 { puts stderr "TIMEOUT_SSH: $host";    exit 1 }
+    "Connection refused"                    { puts stderr "REFUSED: $host";        exit 1 }
+    "No route to host"                      { puts stderr "UNREACHABLE: $host";    exit 1 }
+    "Are you sure you want to continue"     { send "yes\r"; exp_continue }
+    -nocase "password:"                     { send "${password}\r" }
+}
+
+expect {
+    timeout                                 { puts stderr "TIMEOUT_PROMPT: $host"; exit 1 }
+    "Permission denied"                     { puts stderr "AUTHFAIL: $host";       exit 1 }
+    -re {[$#]\s*$}                          { }
+}
+
+# Run collect.sh as sudo
+send "sudo -S bash /tmp/collect.sh\r"
+
+expect {
+    timeout                                 { puts stderr "TIMEOUT_SUDO: $host";   exit 1 }
+    "is not allowed to run sudo"            { puts stderr "SUDODENY: $host";       exit 1 }
+    -nocase "password"                      { send "${password}\r"; exp_continue }
+    -re {[$#]\s*$}                          { }
+}
+
+# Wait for collect.sh to finish executing
+expect {
+    timeout                                 { puts stderr "TIMEOUT_SCRIPT: $host"; exit 1 }
+    -re {[$#]\s*$}                          { }
+}
+
+# -----------------------------------------------
+# STEP 3 — Find the CSV collect.sh dropped in /tmp
+# -----------------------------------------------
+send "ls -t /tmp/*.csv | head -1\r"
+
+set remote_csv ""
+expect {
+    timeout                                 { puts stderr "TIMEOUT_FIND: $host";   exit 1 }
+    -re {(/tmp/\S+\.csv)} {
+        set remote_csv [string trim $expect_out(1,string)]
+    }
+}
+
+if {$remote_csv eq ""} {
+    puts stderr "NOCSV: $host — collect.sh ran but no CSV found in /tmp"
+    exit 1
+}
+
+# -----------------------------------------------
+# STEP 4 — Cat the CSV back over the SSH session
+# -----------------------------------------------
+send "cat ${remote_csv}\r"
+
+set csv_data ""
+expect {
+    timeout                                 { puts stderr "TIMEOUT_CAT: $host";    exit 1 }
+    -re {(.*)\r\n[$#]\s*$} {
+        set csv_data $expect_out(1,string)
+    }
+}
+
+# Save to local output file on jump server
+set fh [open $output_file w]
+puts $fh $csv_data
+close $fh
+
+send "exit\r"
+expect eof
+exit 0

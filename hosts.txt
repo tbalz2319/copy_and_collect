@@ -1,0 +1,5 @@
+server01.corp.com
+server02.corp.com
+server03.corp.com
+# Add all 165 hosts here, one per line
+# Lines starting with # are ignored by the script
